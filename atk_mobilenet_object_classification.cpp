@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <mutex>
 #include "atk_mobilenet_object_classification.h"
 #include "mongoose.h"
 
@@ -19,36 +20,42 @@ struct ClassificationResult {
 static ClassificationResult classify_image(const void *data, size_t len) {
   ClassificationResult res = {{0}, {0}};
   
+  // 将静态变量改为局部静态确保线程安全
+  static std::once_flag init_flag;
+  static rknn_context ctx;
+  static rknn_input_output_num io_num;  // 添加io_num变量
+  static int model_width = 0, model_height = 0;
+
+  std::call_once(init_flag, [&](){
+      const char *model_path = "./mobilenet_v1_rv1109_rv1126.rknn";
+      int model_len = 0;
+      unsigned char *model = load_model(model_path, &model_len);
+      if (rknn_init(&ctx, model, model_len, 0) < 0) {
+          fprintf(stderr, "Model init failed\n");
+          exit(1);
+      }
+
+      // 查询输入输出数量
+      if (rknn_query(ctx, RKNN_QUERY_IN_OUT_NUM, &io_num, sizeof(io_num)) < 0) {
+          fprintf(stderr, "查询输入输出数量失败\n");
+          exit(1);
+      }
+      printf("模型信息: 输入数量=%d, 输出数量=%d\n", 
+             io_num.n_input, io_num.n_output);
+
+      // 初始化模型尺寸
+      rknn_tensor_attr input_attr = {0};
+      input_attr.index = 0;
+      rknn_query(ctx, RKNN_QUERY_INPUT_ATTR, &input_attr, sizeof(input_attr));
+      model_width = input_attr.dims[1];
+      model_height = input_attr.dims[2];
+  });
+
   // 将二进制数据解码为OpenCV Mat
   cv::Mat img = cv::imdecode(cv::Mat(1, len, CV_8U, (void*)data), cv::IMREAD_COLOR);
   if (img.empty()) {
     fprintf(stderr, "Image decode failed\n");
     return res;
-  }
-
-  // 复用原有处理流程
-  static rknn_context ctx;
-  static unsigned char *model = NULL;
-  static int model_width = 0, model_height = 0;
-  
-  // 首次加载模型
-  if (model == NULL) {
-    int model_len = 0;
-    const char *model_path = "./mobilenet_v1_rv1109_rv1126.rknn";
-    model = load_model(model_path, &model_len);
-    if (rknn_init(&ctx, model, model_len, 0) < 0) {
-      fprintf(stderr, "Model init failed\n");
-      return res;
-    }
-    
-    // 获取模型输入尺寸（原有逻辑）
-    rknn_input_output_num io_num;
-    rknn_query(ctx, RKNN_QUERY_IN_OUT_NUM, &io_num, sizeof(io_num));
-    rknn_tensor_attr input_attr;
-    input_attr.index = 0;
-    rknn_query(ctx, RKNN_QUERY_INPUT_ATTR, &input_attr, sizeof(input_attr));
-    model_width = input_attr.dims[1];
-    model_height = input_attr.dims[2];
   }
 
   // 图像预处理
@@ -65,7 +72,10 @@ static ClassificationResult classify_image(const void *data, size_t len) {
   inputs[0].type = RKNN_TENSOR_UINT8;
   inputs[0].fmt = RKNN_TENSOR_NHWC;
   
-  rknn_inputs_set(ctx, 1, inputs);
+  if (rknn_inputs_set(ctx, 1, inputs) < 0) {
+    fprintf(stderr, "设置输入失败\n");
+    return res;
+  }
 
   // 执行推理
   if (rknn_run(ctx, nullptr) < 0) {
@@ -74,20 +84,50 @@ static ClassificationResult classify_image(const void *data, size_t len) {
   }
 
   // 获取输出
-  rknn_output outputs[1];
-  outputs[0].want_float = 1;
-  rknn_outputs_get(ctx, 1, outputs, NULL);
+  rknn_output outputs[io_num.n_output];
+  memset(outputs, 0, sizeof(outputs));
+  for (int i = 0; i < io_num.n_output; i++) {
+      outputs[i].want_float = 1;
+  }
   
-  // 处理结果
-  float *buffer = (float *)outputs[0].buf;
-  uint32_t sz = outputs[0].size / 4;
-  rknn_GetTop(buffer, res.probs, res.classes, sz, 5);
+  if (rknn_outputs_get(ctx, io_num.n_output, outputs, NULL) < 0) {
+      fprintf(stderr, "获取输出失败\n");
+      return res;
+  }
+
+  // 处理每个输出
+  for (int i = 0; i < io_num.n_output; i++) {
+      float *buffer = (float *)outputs[i].buf;
+      uint32_t sz = outputs[i].size / sizeof(float);
+      
+      printf("处理输出 %d: 大小=%u 字节\n", i, outputs[i].size);
+      
+      // 只处理第一个输出（假设这是分类结果）
+      if (i == 0) {
+          rknn_GetTop(buffer, res.probs, res.classes, sz, 5);
+          
+          // 打印结果用于调试
+          printf("分类结果:\n");
+          for (int j = 0; j < 5; j++) {
+              printf("  Top%d: class=%d, prob=%.4f\n", 
+                     j+1, res.classes[j], res.probs[j]);
+          }
+      }
+  }
+
+  // 确保释放输出资源
+  rknn_outputs_release(ctx, io_num.n_output, outputs);
   
   // 调整类别索引（根据原始代码逻辑）
   for (int i = 0; i < 5; i++) res.classes[i] -= 1;
-
-  rknn_outputs_release(ctx, 1, outputs);
+  
   return res;
+}
+
+// 添加自定义方法比较函数
+static int method_cmp(struct mg_str method, const char *expected) {
+  size_t n = strlen(expected);
+  return method.len != n || strncasecmp(method.buf, expected, n) != 0;
 }
 
 // HTTP事件处理
@@ -115,8 +155,9 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
     
     struct mg_str uri_pattern = mg_str("/api/classify");
     if (mg_match(hm->uri, uri_pattern, NULL)) {
-      if (mg_casecmp(hm->method.buf, "POST") != 0) {
-        printf("⚠️ 拒绝请求：不支持的HTTP方法\n");
+      if (method_cmp(hm->method, "POST")) {
+        printf("⚠️ 方法不匹配 | 实际方法: %.*s\n", 
+               (int)hm->method.len, hm->method.buf);
         mg_http_reply(c, 405, "", "{\"error\":\"Method not allowed\"}");
         return;
       }
@@ -133,18 +174,31 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
       printf("🕒 分类耗时: %.3f 秒\n", elapsed);
       
       printf("📤 发送响应...\n");
-      mg_http_reply(c, 200, "Content-Type: application/json\r\n",
-                   "{\"results\":["
-                   "{\"class\":%d,\"prob\":%.4f},"
-                   "{\"class\":%d,\"prob\":%.4f},"
-                   "{\"class\":%d,\"prob\":%.4f},"
-                   "{\"class\":%d,\"prob\":%.4f},"
-                   "{\"class\":%d,\"prob\":%.4f}]}",
-                   res.classes[0], res.probs[0],
-                   res.classes[1], res.probs[1],
-                   res.classes[2], res.probs[2],
-                   res.classes[3], res.probs[3],
-                   res.classes[4], res.probs[4]);
+
+      // 创建临时缓冲区存储响应数据
+      char buffer[256];
+      int written = snprintf(buffer, sizeof(buffer), 
+          "{\"results\":["
+          "{\"class\":%d,\"prob\":%.4f},"
+          "{\"class\":%d,\"prob\":%.4f},"
+          "{\"class\":%d,\"prob\":%.4f},"
+          "{\"class\":%d,\"prob\":%.4f},"
+          "{\"class\":%d,\"prob\":%.4f}]}",
+          res.classes[0], res.probs[0],
+          res.classes[1], res.probs[1],
+          res.classes[2], res.probs[2],
+          res.classes[3], res.probs[3],
+          res.classes[4], res.probs[4]);
+
+      if (written >= (int)sizeof(buffer)) {
+          fprintf(stderr, "响应缓冲区溢出！需要 %d 字节\n", written);
+          mg_http_reply(c, 500, "", "{\"error\":\"Internal error\"}");
+          return;
+      }
+
+      printf("实际生成的JSON: %s\n", buffer);
+      mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", buffer);
+      
       printf("✅ 响应已发送\n");
     } else {
       printf("⚠️ 拒绝请求：路径未找到\n");

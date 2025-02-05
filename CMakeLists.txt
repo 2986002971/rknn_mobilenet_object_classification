@@ -15,6 +15,11 @@ set(CMAKE_CXX_STANDARD 11)
 add_definitions(-g -O0 -ggdb -gdwarf -funwind-tables -rdynamic)
 add_definitions(-Wno-write-strings -Wno-return-type)
 
+# 添加mongoose源文件
+set(MONGOOSE_SOURCES
+    mongoose.c
+)
+
 set(OPENCV_LIBS opencv_core opencv_imgcodecs opencv_imgproc opencv_features2d opencv_flann opencv_highgui opencv_freetype)
 set(RKMEDIA_LIBS easymedia od_share rga rkaiq rknn_api sample_common_isp)
 	
@@ -35,5 +40,18 @@ include_directories(./include/3rdparty/rga/include)
 
 add_definitions(-DRKAIQ)
 
-add_executable(atk_mobilenet_object_classification atk_mobilenet_object_classification.cpp drm_func.c rga_func.c)
-target_link_libraries(atk_mobilenet_object_classification ${OPENCV_LIBS} ${RKMEDIA_LIBS} pthread dl)
+# 修改可执行文件的源文件列表，添加mongoose.c
+add_executable(atk_mobilenet_object_classification 
+    atk_mobilenet_object_classification.cpp 
+    drm_func.c 
+    rga_func.c
+    ${MONGOOSE_SOURCES}
+)
+
+# 添加pthread库依赖（Mongoose需要）
+target_link_libraries(atk_mobilenet_object_classification 
+    ${OPENCV_LIBS} 
+    ${RKMEDIA_LIBS} 
+    pthread 
+    dl
+)

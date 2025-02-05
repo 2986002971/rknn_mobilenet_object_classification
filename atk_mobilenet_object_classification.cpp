@@ -3,121 +3,169 @@
 // found in the LICENSE file.
 
 #include "atk_mobilenet_object_classification.h"
+#include "mongoose.h"
 
+#define HTTP_PORT "8080"
+static const char *s_listen_addr = "http://0.0.0.0:" HTTP_PORT;
+static struct mg_mgr mgr;
 
-int main(int argc, char *argv[])
-{
-  if (argc != 2) {
-    printf("Usage: %s <image_path>\n", argv[0]);
-    return -1;
-  }
+// 分类结果结构体
+struct ClassificationResult {
+  uint32_t classes[5];
+  float probs[5];
+};
 
-  // 读取输入图片
-  cv::Mat img = cv::imread(argv[1]);
+// 封装原有分类逻辑
+static ClassificationResult classify_image(const void *data, size_t len) {
+  ClassificationResult res = {{0}, {0}};
+  
+  // 将二进制数据解码为OpenCV Mat
+  cv::Mat img = cv::imdecode(cv::Mat(1, len, CV_8U, (void*)data), cv::IMREAD_COLOR);
   if (img.empty()) {
-    printf("ERROR: Cannot read image file %s\n", argv[1]);
-    return -1;
+    fprintf(stderr, "Image decode failed\n");
+    return res;
   }
 
-  // 初始化RKNN
-  rknn_context ctx;
-  int model_len = 0;
-  unsigned char *model;
-  const char *model_path = "./mobilenet_v1_rv1109_rv1126.rknn";
-
-  printf("Loading model...\n");
-  model = load_model(model_path, &model_len);
-  if (!model) {
-    return -1;
-  }
-
-  int ret = rknn_init(&ctx, model, model_len, 0);
-  if (ret < 0) {
-    printf("rknn_init fail! ret=%d\n", ret);
-    free(model);
-    return -1;
-  }
-
-  // 获取模型信息
-  rknn_input_output_num io_num;
-  ret = rknn_query(ctx, RKNN_QUERY_IN_OUT_NUM, &io_num, sizeof(io_num));
-  if (ret != RKNN_SUCC) {
-    printf("rknn_query fail! ret=%d\n", ret);
-    return -1;
-  }
-
-  // 获取输入tensor信息
-  rknn_tensor_attr input_attrs[io_num.n_input];
-  memset(input_attrs, 0, sizeof(input_attrs));
-  for (unsigned int i = 0; i < io_num.n_input; i++) {
-    input_attrs[i].index = i;
-    ret = rknn_query(ctx, RKNN_QUERY_INPUT_ATTR, &(input_attrs[i]), sizeof(rknn_tensor_attr));
-    if (ret != RKNN_SUCC) {
-      printf("rknn_query fail! ret=%d\n", ret);
-      return -1;
+  // 复用原有处理流程
+  static rknn_context ctx;
+  static unsigned char *model = NULL;
+  static int model_width = 0, model_height = 0;
+  
+  // 首次加载模型
+  if (model == NULL) {
+    int model_len = 0;
+    const char *model_path = "./mobilenet_v1_rv1109_rv1126.rknn";
+    model = load_model(model_path, &model_len);
+    if (rknn_init(&ctx, model, model_len, 0) < 0) {
+      fprintf(stderr, "Model init failed\n");
+      return res;
     }
+    
+    // 获取模型输入尺寸（原有逻辑）
+    rknn_input_output_num io_num;
+    rknn_query(ctx, RKNN_QUERY_IN_OUT_NUM, &io_num, sizeof(io_num));
+    rknn_tensor_attr input_attr;
+    input_attr.index = 0;
+    rknn_query(ctx, RKNN_QUERY_INPUT_ATTR, &input_attr, sizeof(input_attr));
+    model_width = input_attr.dims[1];
+    model_height = input_attr.dims[2];
   }
 
-  // 获取模型输入尺寸
-  int model_width = input_attrs[0].dims[1];
-  int model_height = input_attrs[0].dims[2];
-
-  // 调整图片尺寸
+  // 图像预处理
   cv::Mat resized_img;
   cv::resize(img, resized_img, cv::Size(model_width, model_height));
 
-  // 准备输入数据
+  // 设置输入
   rknn_input inputs[1];
   memset(inputs, 0, sizeof(inputs));
   inputs[0].index = 0;
-  inputs[0].type = RKNN_TENSOR_UINT8;
-  inputs[0].size = model_width * model_height * 3;
-  inputs[0].fmt = RKNN_TENSOR_NHWC;
   inputs[0].buf = resized_img.data;
+  inputs[0].size = (uint32_t)(model_width * model_height * 3);
+  inputs[0].pass_through = false;
+  inputs[0].type = RKNN_TENSOR_UINT8;
+  inputs[0].fmt = RKNN_TENSOR_NHWC;
+  
+  rknn_inputs_set(ctx, 1, inputs);
 
-  ret = rknn_inputs_set(ctx, io_num.n_input, inputs);
-  if (ret < 0) {
-    printf("rknn_inputs_set fail! ret=%d\n", ret);
-    return -1;
-  }
-
-  // 运行推理
-  ret = rknn_run(ctx, nullptr);
-  if (ret < 0) {
-    printf("rknn_run fail! ret=%d\n", ret);
-    return -1;
+  // 执行推理
+  if (rknn_run(ctx, nullptr) < 0) {
+    fprintf(stderr, "Inference failed\n");
+    return res;
   }
 
   // 获取输出
-  rknn_output outputs[io_num.n_output];
-  memset(outputs, 0, sizeof(outputs));
-  for (unsigned int i = 0; i < io_num.n_output; i++) {
-    outputs[i].want_float = 1;
-  }
-  ret = rknn_outputs_get(ctx, io_num.n_output, outputs, NULL);
-  if (ret < 0) {
-    printf("rknn_outputs_get fail! ret=%d\n", ret);
-    return -1;
-  }
-
+  rknn_output outputs[1];
+  outputs[0].want_float = 1;
+  rknn_outputs_get(ctx, 1, outputs, NULL);
+  
   // 处理结果
-  uint32_t MaxClass[5];
-  float fMaxProb[5];
   float *buffer = (float *)outputs[0].buf;
   uint32_t sz = outputs[0].size / 4;
+  rknn_GetTop(buffer, res.probs, res.classes, sz, 5);
+  
+  // 调整类别索引（根据原始代码逻辑）
+  for (int i = 0; i < 5; i++) res.classes[i] -= 1;
 
-  rknn_GetTop(buffer, fMaxProb, MaxClass, sz, 5);
-  printf("\nClassification Results:\n");
-  printf("----------------------\n");
-  for (int i = 0; i < 5; i++) {
-    printf("Top-%d: Class %d, Probability: %.6f\n", i+1, MaxClass[i]-1, fMaxProb[i]);
+  rknn_outputs_release(ctx, 1, outputs);
+  return res;
+}
+
+// HTTP事件处理
+static void fn(struct mg_connection *c, int ev, void *ev_data) {
+  if (ev == MG_EV_HTTP_MSG) {
+    struct mg_http_message *hm = (struct mg_http_message *)ev_data;
+    
+    // 添加详细的请求日志
+    printf("\n=== 收到新请求 ===\n");
+    printf("客户端地址: %s\n", c->rem.ip);
+    printf("请求方法: %.*s\n", (int)hm->method.len, hm->method.buf);
+    printf("请求路径: %.*s\n", (int)hm->uri.len, hm->uri.buf);
+    printf("协议版本: %.*s\n", (int)hm->proto.len, hm->proto.buf);
+    
+    // 修正headers的访问方式
+    printf("请求头数量: %d\n", (int)(sizeof(hm->headers)/sizeof(hm->headers[0])));
+    for (size_t i = 0; i < sizeof(hm->headers)/sizeof(hm->headers[0]); i++) {
+      if (hm->headers[i].name.len == 0) break;
+      printf("Header: %.*s => %.*s\n", 
+             (int)hm->headers[i].name.len, hm->headers[i].name.buf,
+             (int)hm->headers[i].value.len, hm->headers[i].value.buf);
+    }
+    
+    printf("请求体大小: %zu bytes\n", hm->body.len);
+    
+    struct mg_str uri_pattern = mg_str("/api/classify");
+    if (mg_match(hm->uri, uri_pattern, NULL)) {
+      if (mg_casecmp(hm->method.buf, "POST") != 0) {
+        printf("⚠️ 拒绝请求：不支持的HTTP方法\n");
+        mg_http_reply(c, 405, "", "{\"error\":\"Method not allowed\"}");
+        return;
+      }
+      
+      printf("✅ 开始处理图像分类...\n");
+      struct timespec start, end;
+      clock_gettime(CLOCK_MONOTONIC, &start);
+      
+      ClassificationResult res = classify_image(hm->body.buf, hm->body.len);
+      
+      clock_gettime(CLOCK_MONOTONIC, &end);
+      double elapsed = (end.tv_sec - start.tv_sec) + 
+                      (end.tv_nsec - start.tv_nsec) / 1e9;
+      printf("🕒 分类耗时: %.3f 秒\n", elapsed);
+      
+      printf("📤 发送响应...\n");
+      mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+                   "{\"results\":["
+                   "{\"class\":%d,\"prob\":%.4f},"
+                   "{\"class\":%d,\"prob\":%.4f},"
+                   "{\"class\":%d,\"prob\":%.4f},"
+                   "{\"class\":%d,\"prob\":%.4f},"
+                   "{\"class\":%d,\"prob\":%.4f}]}",
+                   res.classes[0], res.probs[0],
+                   res.classes[1], res.probs[1],
+                   res.classes[2], res.probs[2],
+                   res.classes[3], res.probs[3],
+                   res.classes[4], res.probs[4]);
+      printf("✅ 响应已发送\n");
+    } else {
+      printf("⚠️ 拒绝请求：路径未找到\n");
+      mg_http_reply(c, 404, "", "{\"error\":\"Not Found\"}");
+    }
+    printf("=== 请求处理结束 ===\n\n");
   }
+}
 
-  // 清理资源
-  rknn_outputs_release(ctx, io_num.n_output, outputs);
-  rknn_destroy(ctx);
-  free(model);
-
+int main(int argc, char *argv[]) {
+  mg_mgr_init(&mgr);
+  mg_http_listen(&mgr, s_listen_addr, fn, NULL);
+  printf("🚀 服务器已启动，监听地址: %s\n", s_listen_addr);
+  printf("📡 等待客户端连接...\n");
+  
+  // 主事件循环
+  for (;;) {
+    mg_mgr_poll(&mgr, 50); // 50ms timeout
+  }
+  
+  mg_mgr_free(&mgr);
   return 0;
 }
 

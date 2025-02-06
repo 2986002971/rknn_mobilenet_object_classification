@@ -1,46 +1,35 @@
 #ifndef _ATK_MOBILENET_OBJECT_CLASSIFICATION_H
 #define _ATK_MOBILENET_OBJECT_CLASSIFICATION_H
 
-#include <getopt.h>
-#include <math.h>
-#include <pthread.h>
-#include <signal.h>
-#include <stdbool.h>
+// 标准库
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <stdbool.h>
+#include <pthread.h>
+#include <signal.h>
 #include <malloc.h>
 #include <dlfcn.h>
 
-#define _BASETSD_H
-
-
-#include "rga.h"
-#include "drm_func.h"
-#include "rga_func.h"
+// RKNN相关
 #include "rknn_api.h"
-#include "rkmedia_api.h"
-#include "sample_common.h"
+
+// OpenCV相关
 #include "opencv2/opencv.hpp"
-#include "im2d.h"
 
+// HTTP服务器相关
+#include "mongoose.h"
 
-int disp_width = 720;
-int disp_height = 1280;
-RK_U32 video_width = 2592;
-RK_U32 video_height = 1944;
+// 分类结果结构体
+typedef struct {
+    uint32_t classes[5];  // 前5个分类的索引
+    float probs[5];       // 对应的概率值
+} ClassificationResult;
 
-static bool quit = false;
-
-int rgb24_resize(unsigned char *input_rgb, unsigned char *output_rgb, int width,int height, int outwidth, int outheight);
-
+// 函数声明
 static unsigned char *load_model(const char *filename, int *model_size);
+static int rknn_GetTop(float *pfProb, float *pfMaxProb, uint32_t *pMaxClass,
+                      uint32_t outputCount, uint32_t topNum);
 
-static void printRKNNTensor(rknn_tensor_attr *attr);
-
-void *rkmedia_rknn_thread(void *args);
-
-static int rknn_GetTop(float *pfProb, float *pfMaxProb, uint32_t *pMaxClass, uint32_t outputCount, uint32_t topNum);
-
-#endif
+#endif // _ATK_MOBILENET_OBJECT_CLASSIFICATION_H

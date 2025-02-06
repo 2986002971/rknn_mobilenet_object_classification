@@ -3,8 +3,15 @@
 # http://www.openedv.com/forum.php
 
 cmake_minimum_required(VERSION 3.8)
+project(ATK_MobileNet_Classification)
 message(STATUS "cmake version ${CMAKE_VERSION}")
 
+# IPO设置
+cmake_policy(SET CMP0069 NEW)
+include(CheckIPOSupported)
+check_ipo_supported(RESULT supported OUTPUT error)
+
+# 工具链设置
 set(TOOLCHAIN_DIR /opt/atk-dlrv1126-toolchain)
 set(CMAKE_CXX_COMPILER ${TOOLCHAIN_DIR}/usr/bin/arm-linux-gnueabihf-g++)
 set(CMAKE_C_COMPILER ${TOOLCHAIN_DIR}/usr/bin/arm-linux-gnueabihf-gcc)
@@ -27,9 +34,6 @@ add_definitions(-fomit-frame-pointer)    # 省略帧指针
 add_definitions(-funroll-loops)          # 循环展开
 add_definitions(-flto)                   # 链接时优化
 
-# 调试信息（发布版本可以注释掉）
-# add_definitions(-g -ggdb -gdwarf)
-
 # 警告控制
 add_definitions(-Wall)                   # 启用所有警告
 add_definitions(-Wno-write-strings)      # 忽略字符串警告
@@ -37,48 +41,39 @@ add_definitions(-Wno-return-type)        # 忽略返回类型警告
 add_definitions(-Wno-sign-compare)       # 忽略符号比较警告
 
 # 添加mongoose源文件
-set(MONGOOSE_SOURCES
-    mongoose.c
-)
+set(MONGOOSE_SOURCES mongoose.c)
 
-set(OPENCV_LIBS opencv_core opencv_imgcodecs opencv_imgproc opencv_features2d opencv_flann opencv_highgui opencv_freetype)
-set(RKMEDIA_LIBS easymedia od_share rga rkaiq rknn_api sample_common_isp)
-	
+# 设置所需的库
+set(OPENCV_LIBS opencv_core opencv_imgcodecs opencv_imgproc)
+
+# 包含目录
 include_directories(${SYSROOT})
-include_directories(${SYSROOT}/rga)
-include_directories(${SYSROOT}/easymedia)
-include_directories(${SYSROOT}/rkaiq/uAPI)
-include_directories(${SYSROOT}/rkaiq/xcore)
-include_directories(${SYSROOT}/rkaiq/algos)
-include_directories(${SYSROOT}/rkaiq/common)
-include_directories(${SYSROOT}/rkaiq/iq_parser)
 include_directories(${SYSROOT}/rknn)
 include_directories(.)
 include_directories(./include)
-include_directories(./include/3rdparty)
-include_directories(./include/3rdparty/drm/include/libdrm)
-include_directories(./include/3rdparty/rga/include)
 
-add_definitions(-DRKAIQ)
-
-# 修改可执行文件的源文件列表，添加mongoose.c
+# 添加可执行文件
 add_executable(atk_mobilenet_object_classification 
     atk_mobilenet_object_classification.cpp 
-    drm_func.c 
-    rga_func.c
     ${MONGOOSE_SOURCES}
 )
 
-# 添加pthread库依赖（Mongoose需要）
+# 链接库
 target_link_libraries(atk_mobilenet_object_classification 
     ${OPENCV_LIBS} 
-    ${RKMEDIA_LIBS} 
+    rknn_api
     pthread 
     dl
 )
 
 # 链接时优化
-set_target_properties(atk_mobilenet_object_classification PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+if(supported)
+    message(STATUS "IPO/LTO enabled")
+    set_target_properties(atk_mobilenet_object_classification PROPERTIES 
+        INTERPROCEDURAL_OPTIMIZATION TRUE)
+else()
+    message(STATUS "IPO/LTO not supported: <${error}>")
+endif()
 
 # 设置优化标志
 target_compile_options(atk_mobilenet_object_classification PRIVATE

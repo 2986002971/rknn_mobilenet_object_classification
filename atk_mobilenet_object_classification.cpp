@@ -175,9 +175,9 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
       
       printf("📤 发送响应...\n");
 
-      // 创建临时缓冲区存储响应数据
-      char buffer[256];
-      int written = snprintf(buffer, sizeof(buffer), 
+      // 生成JSON响应
+      char json_response[512];
+      int written = snprintf(json_response, sizeof(json_response),
           "{\"results\":["
           "{\"class\":%d,\"prob\":%.4f},"
           "{\"class\":%d,\"prob\":%.4f},"
@@ -190,16 +190,19 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
           res.classes[3], res.probs[3],
           res.classes[4], res.probs[4]);
 
-      if (written >= (int)sizeof(buffer)) {
-          fprintf(stderr, "响应缓冲区溢出！需要 %d 字节\n", written);
-          mg_http_reply(c, 500, "", "{\"error\":\"Internal error\"}");
-          return;
-      }
+      printf("实际生成的JSON: %s\n", json_response);
 
-      printf("实际生成的JSON: %s\n", buffer);
-      mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", buffer);
-      
-      printf("✅ 响应已发送\n");
+      // 修改响应发送方式
+      mg_printf(c, "HTTP/1.1 200 OK\r\n"
+                "Content-Type: application/json\r\n"
+                "Content-Length: %d\r\n"
+                "Connection: close\r\n"
+                "\r\n"
+                "%s", written, json_response);
+
+      // 确保数据发送完成
+      c->is_resp = 1;  // 标记为响应已发送
+      c->is_draining = 1;  // 确保所有数据都被发送
     } else {
       printf("⚠️ 拒绝请求：路径未找到\n");
       mg_http_reply(c, 404, "", "{\"error\":\"Not Found\"}");

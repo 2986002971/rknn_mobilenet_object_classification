@@ -11,6 +11,8 @@
 #include <signal.h>
 #include <malloc.h>
 #include <dlfcn.h>
+#include <mutex>
+#include <math.h>
 
 // RKNN相关
 #include "rknn_api.h"
@@ -23,13 +25,12 @@
 
 // 分类结果结构体
 typedef struct {
-    uint32_t classes[5];  // 前5个分类的索引
-    float probs[5];       // 对应的概率值
+    uint32_t class_id;    // 分类结果（0或1）
+    float probability;    // 概率值
 } ClassificationResult;
 
 // 函数声明
 static unsigned char *load_model(const char *filename, int *model_size);
-static int rknn_GetTop(float *pfProb, float *pfMaxProb, uint32_t *pMaxClass,
-                      uint32_t outputCount, uint32_t topNum);
+static int rknn_GetResult(float *prob_data, ClassificationResult *result);
 
 #endif // _ATK_MOBILENET_OBJECT_CLASSIFICATION_H

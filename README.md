@@ -29,21 +29,13 @@ Content-Length: <file_size>
 **成功响应**：
 ```json
 {
-  "results": [
-    {"class": 0, "prob": 0.8123},
-    {"class": 1, "prob": 0.1021},
-    {"class": 2, "prob": 0.0456},
-    {"class": 3, "prob": 0.0211},
-    {"class": 4, "prob": 0.0089}
-  ]
+  "class": 1,
+  "probability": 0.6593
 }
 ```
 
 **错误代码**：
-- 400：无效图片数据
-- 404：路径不存在
-- 405：方法不支持
-- 500：推理引擎错误
+待定
 
 ## 4. 使用示例
 
@@ -92,20 +84,27 @@ kill -9 <PID>
 
 ## 快速启动
 1. 启动服务器：
-```bash
+````bash
 cd ~/mobilenet
 ./atk_mobilenet_object_classification
-```
+````
+
 服务器将在本地8080端口启动，等待分类请求。
 
 2. 测试服务：
-```bash
+````bash
 # 在另一个终端中运行
 cd ~/mobilenet
-./http_mini_client space_shuttle_224.jpg
-```
+./http_mini_client 11.jpg
+````
 
-如果一切正常，您将看到分类结果和概率值。
+如果一切正常，您将看到类似以下的分类结果：
+````json
+{"class":1,"probability":0.6593}
+````
+其中：
+- `class`: 分类结果（0或1）
+- `probability`: 对应类别的概率值（0-1之间）
 
 ## 注意事项
 - 确保服务器和测试客户端在同一目录下运行

@@ -2,7 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <mutex>
 #include "atk_mobilenet_object_classification.h"
 #include "mongoose.h"
 
@@ -12,7 +11,7 @@ static struct mg_mgr mgr;
 
 // 封装原有分类逻辑
 static ClassificationResult classify_image(const void *data, size_t len) {
-  ClassificationResult res = {{0}, {0}};
+  ClassificationResult res = {0, 0.0f};  // 简单初始化：class_id=0, probability=0.0
   
   // 将静态变量改为局部静态确保线程安全
   static std::once_flag init_flag;
@@ -21,7 +20,7 @@ static ClassificationResult classify_image(const void *data, size_t len) {
   static int model_width = 0, model_height = 0;
 
   std::call_once(init_flag, [&](){
-      const char *model_path = "./mobilenet_v1_rv1109_rv1126.rknn";
+      const char *model_path = "./model.rknn";
       int model_len = 0;
       unsigned char *model = load_model(model_path, &model_len);
       if (rknn_init(&ctx, model, model_len, 0) < 0) {
@@ -92,28 +91,22 @@ static ClassificationResult classify_image(const void *data, size_t len) {
   // 处理每个输出
   for (int i = 0; i < io_num.n_output; i++) {
       float *buffer = (float *)outputs[i].buf;
-      uint32_t sz = outputs[i].size / sizeof(float);
       
       printf("处理输出 %d: 大小=%u 字节\n", i, outputs[i].size);
       
       // 只处理第一个输出（假设这是分类结果）
       if (i == 0) {
-          rknn_GetTop(buffer, res.probs, res.classes, sz, 5);
+          rknn_GetResult(buffer, &res);
           
           // 打印结果用于调试
           printf("分类结果:\n");
-          for (int j = 0; j < 5; j++) {
-              printf("  Top%d: class=%d, prob=%.4f\n", 
-                     j+1, res.classes[j], res.probs[j]);
-          }
+          printf("  class=%d, probability=%.4f\n", 
+                 res.class_id, res.probability);
       }
   }
 
   // 确保释放输出资源
   rknn_outputs_release(ctx, io_num.n_output, outputs);
-  
-  // 调整类别索引（根据原始代码逻辑）
-  for (int i = 0; i < 5; i++) res.classes[i] -= 1;
   
   return res;
 }
@@ -171,28 +164,16 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
 
       // 生成JSON响应
       char json_response[512];
-      int written = snprintf(json_response, sizeof(json_response),
-          "{\"results\":["
-          "{\"class\":%d,\"prob\":%.4f},"
-          "{\"class\":%d,\"prob\":%.4f},"
-          "{\"class\":%d,\"prob\":%.4f},"
-          "{\"class\":%d,\"prob\":%.4f},"
-          "{\"class\":%d,\"prob\":%.4f}]}",
-          res.classes[0], res.probs[0],
-          res.classes[1], res.probs[1],
-          res.classes[2], res.probs[2],
-          res.classes[3], res.probs[3],
-          res.classes[4], res.probs[4]);
+      snprintf(json_response, sizeof(json_response),
+          "{\"class\":%d,\"probability\":%.4f}",
+          res.class_id, res.probability);
 
-      printf("实际生成的JSON: %s\n", json_response);
+      printf("分类结果: 类别=%d, 概率=%.4f\n", 
+             res.class_id, res.probability);
 
-      // 修改响应发送方式
-      mg_printf(c, "HTTP/1.1 200 OK\r\n"
-                "Content-Type: application/json\r\n"
-                "Content-Length: %d\r\n"
-                "Connection: close\r\n"
-                "\r\n"
-                "%s", written, json_response);
+      // 发送响应
+      mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", 
+                   json_response);
 
       // 确保数据发送完成
       c->is_resp = 1;  // 标记为响应已发送
@@ -245,29 +226,47 @@ static unsigned char *load_model(const char *filename, int *model_size) {
   return model;
 }
 
-static int rknn_GetTop(float *pfProb, float *pfMaxProb, uint32_t *pMaxClass,
-                      uint32_t outputCount, uint32_t topNum) {
-  uint32_t i, j;
-#define MAX_TOP_NUM 20
-  if (topNum > MAX_TOP_NUM) return 0;
-  
-  memset(pfMaxProb, 0, sizeof(float) * topNum);
-  memset(pMaxClass, 0xff, sizeof(float) * topNum);
-
-  for (j = 0; j < topNum; j++) {
-    for (i = 0; i < outputCount; i++) {
-      if ((i == *(pMaxClass + 0)) || (i == *(pMaxClass + 1)) || 
-          (i == *(pMaxClass + 2)) || (i == *(pMaxClass + 3)) || 
-          (i == *(pMaxClass + 4))) {
-        continue;
-      }
-
-      if (pfProb[i] > *(pfMaxProb + j)) {
-        *(pfMaxProb + j) = pfProb[i];
-        *(pMaxClass + j) = i;
-      }
+// 添加softmax函数
+static void softmax(float* input, size_t size) {
+    float max_val = input[0];
+    float sum = 0.0f;
+    
+    // 找最大值
+    for (size_t i = 0; i < size; i++) {
+        if (input[i] > max_val) {
+            max_val = input[i];
+        }
     }
-  }
+    
+    // 计算exp并求和
+    for (size_t i = 0; i < size; i++) {
+        input[i] = exp(input[i] - max_val);  // 减去最大值避免数值溢出
+        sum += input[i];
+    }
+    
+    // 归一化
+    for (size_t i = 0; i < size; i++) {
+        input[i] /= sum;
+    }
+}
 
-  return 1;
+// 修改结果处理函数
+static int rknn_GetResult(float *prob_data, ClassificationResult *result) {
+    // 对输出进行softmax处理
+    softmax(prob_data, 2);  // 2个类别
+    
+    // 获取第一个类别的概率
+    float prob_0 = prob_data[0];
+    float prob_1 = prob_data[1];
+    
+    // 选择概率较大的类别
+    if (prob_1 > prob_0) {
+        result->class_id = 1;
+        result->probability = prob_1;
+    } else {
+        result->class_id = 0;
+        result->probability = prob_0;
+    }
+    
+    return 0;
 }

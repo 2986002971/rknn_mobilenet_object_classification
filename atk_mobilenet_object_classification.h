@@ -13,6 +13,12 @@
 #include <dlfcn.h>
 #include <mutex>
 #include <math.h>
+#include <opencv2/dnn.hpp>
+#include <thread>
+#include <vector>
+#include <queue>
+#include <mutex>
+#include <condition_variable>
 
 // RKNN相关
 #include "rknn_api.h"

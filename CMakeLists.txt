@@ -44,7 +44,7 @@ add_definitions(-Wno-sign-compare)       # 忽略符号比较警告
 set(MONGOOSE_SOURCES mongoose.c)
 
 # 设置所需的库
-set(OPENCV_LIBS opencv_core opencv_imgcodecs opencv_imgproc)
+set(OPENCV_LIBS opencv_core opencv_imgcodecs opencv_imgproc opencv_dnn)
 
 # 包含目录
 include_directories(${SYSROOT})
@@ -59,10 +59,10 @@ add_executable(atk_mobilenet_object_classification
 )
 
 # 链接库
-target_link_libraries(atk_mobilenet_object_classification 
-    ${OPENCV_LIBS} 
+target_link_libraries(atk_mobilenet_object_classification
+    ${OPENCV_LIBS}
     rknn_api
-    pthread 
+    pthread
     dl
 )
 

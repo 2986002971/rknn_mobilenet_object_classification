@@ -5,6 +5,106 @@
 #include "atk_mobilenet_object_classification.h"
 #include "mongoose.h"
 
+// Base64解码表
+static const unsigned char base64_table[256] = {
+    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+    255,255,255,255,255,255,255,255,255,255,255,62,255,255,255,63,
+    52,53,54,55,56,57,58,59,60,61,255,255,255,0,255,255,
+    255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,
+    15,16,17,18,19,20,21,22,23,24,25,255,255,255,255,255,
+    255,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,
+    41,42,43,44,45,46,47,48,49,50,51,255,255,255,255,255,
+    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255
+};
+
+// Base64解码函数
+std::vector<unsigned char> base64_decode(const std::string &encoded_string) {
+    size_t in_len = encoded_string.size();
+    size_t i = 0, j = 0;
+    unsigned char char_array_4[4], char_array_3[3];
+    std::vector<unsigned char> decoded_data;
+
+    while (in_len-- && (encoded_string[i] != '=')) {
+        unsigned char c = base64_table[(unsigned char)encoded_string[i++]];
+        if (c == 255) continue; // 跳过无效字符
+        
+        char_array_4[j++] = c;
+        if (j == 4) {
+            char_array_3[0] = (char_array_4[0] << 2) + ((char_array_4[1] & 0x30) >> 4);
+            char_array_3[1] = ((char_array_4[1] & 0xf) << 4) + ((char_array_4[2] & 0x3c) >> 2);
+            char_array_3[2] = ((char_array_4[2] & 0x3) << 6) + char_array_4[3];
+
+            for (j = 0; j < 3; j++)
+                decoded_data.push_back(char_array_3[j]);
+            j = 0;
+        }
+    }
+
+    if (j) {
+        for (size_t k = j; k < 4; k++)
+            char_array_4[k] = 0;
+
+        char_array_3[0] = (char_array_4[0] << 2) + ((char_array_4[1] & 0x30) >> 4);
+        char_array_3[1] = ((char_array_4[1] & 0xf) << 4) + ((char_array_4[2] & 0x3c) >> 2);
+        char_array_3[2] = ((char_array_4[2] & 0x3) << 6) + char_array_4[3];
+
+        for (size_t k = 0; k < j - 1; k++)
+            decoded_data.push_back(char_array_3[k]);
+    }
+
+    return decoded_data;
+}
+
+
+// SVM Model class
+class SVMModel {
+public:
+    SVMModel(const std::string& model_path) {
+        net = cv::dnn::readNetFromONNX(model_path);
+    }
+
+    float predict(const std::vector<float>& features) {
+        cv::Mat input(1, features.size(), CV_32F, (void*)features.data());
+        net.setInput(input);
+        cv::Mat output = net.forward();
+        return output.at<float>(0);
+    }
+
+private:
+    cv::dnn::Net net;
+};
+
+// Fusion result structure
+struct FusionResult {
+    int class_id;
+    float probability;
+    float svm_score;
+    float rknn_score;
+};
+
+// Weighted fusion function
+FusionResult weighted_fusion(float svm_score, float rknn_score,
+                           float svm_weight = 0.5f, float rknn_weight = 0.5f) {
+    FusionResult res;
+    float combined = svm_score * svm_weight + rknn_score * rknn_weight;
+    res.class_id = combined > 0.5f ? 1 : 0;
+    res.probability = combined;
+    res.svm_score = svm_score;
+    res.rknn_score = rknn_score;
+    return res;
+}
+
+// Global SVM model instance
+static SVMModel* svm_model = nullptr;
+
 #define HTTP_PORT "8080"
 static const char *s_listen_addr = "http://0.0.0.0:" HTTP_PORT;
 static struct mg_mgr mgr;
@@ -153,26 +253,106 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
       struct timespec start, end;
       clock_gettime(CLOCK_MONOTONIC, &start);
       
-      ClassificationResult res = classify_image(hm->body.buf, hm->body.len);
+      // Simple JSON parser
+      std::string json_str(hm->body.buf, hm->body.len);
+      
+      // Extract image data
+      std::string image_data;
+      size_t image_pos = json_str.find("\"image\":\"");
+      if (image_pos != std::string::npos) {
+          size_t start = image_pos + 9;
+          size_t end = json_str.find("\"", start);
+          if (end != std::string::npos) {
+              image_data = json_str.substr(start, end - start);
+          }
+      }
+      
+      if (image_data.empty()) {
+          printf("⚠️ JSON解析失败: 未找到image字段\n");
+          mg_http_reply(c, 400, "", "{\"error\":\"Invalid JSON: missing image field\"}");
+          return;
+      }
+      
+      // 打印部分图像数据用于调试
+      printf("图像数据大小: %zu bytes\n", image_data.size());
+      printf("图像数据前100字节: ");
+      for (size_t i = 0; i < std::min(image_data.size(), (size_t)100); i++) {
+          printf("%02x ", (unsigned char)image_data[i]);
+          if ((i + 1) % 16 == 0) printf("\n");
+      }
+      printf("\n");
+      
+      ClassificationResult rknn_res = classify_image(
+          image_data.data(), image_data.length());
+      
+      // Extract features with error handling
+      std::vector<float> features;
+      size_t features_pos = json_str.find("\"features\":[");
+      if (features_pos != std::string::npos) {
+          size_t start = features_pos + 11;
+          size_t end = json_str.find("]", start);
+          if (end != std::string::npos) {
+              std::string features_str = json_str.substr(start, end - start);
+              
+              // 去除所有空格和方括号
+              features_str.erase(std::remove(features_str.begin(), features_str.end(), ' '), features_str.end());
+              features_str.erase(std::remove(features_str.begin(), features_str.end(), '['), features_str.end());
+              features_str.erase(std::remove(features_str.begin(), features_str.end(), ']'), features_str.end());
+              
+              // 验证字符串是否只包含数字和逗号
+              if (features_str.find_first_not_of("0123456789,.-") != std::string::npos) {
+                  printf("⚠️ 特征格式错误: 包含非法字符\n");
+                  printf("原始特征字符串: %s\n", features_str.c_str());
+                  mg_http_reply(c, 400, "", "{\"error\":\"Invalid features format: contains invalid characters\"}");
+                  return;
+              }
+              
+              size_t pos = 0;
+              try {
+                  while ((pos = features_str.find(',')) != std::string::npos) {
+                      std::string num_str = features_str.substr(0, pos);
+                      if (!num_str.empty()) {
+                          features.push_back(std::stof(num_str));
+                      }
+                      features_str.erase(0, pos + 1);
+                  }
+                  if (!features_str.empty()) {
+                      features.push_back(std::stof(features_str));
+                  }
+              } catch (const std::invalid_argument& e) {
+                  printf("⚠️ 特征解析失败: %s\n", e.what());
+                  printf("原始特征字符串: %s\n", features_str.c_str());
+                  mg_http_reply(c, 400, "", "{\"error\":\"Invalid features format: failed to parse numbers\"}");
+                  return;
+              }
+          }
+      }
+      
+      float svm_score = svm_model->predict(features);
+      
+      // Combine results
+      FusionResult final_res = weighted_fusion(svm_score, rknn_res.probability);
       
       clock_gettime(CLOCK_MONOTONIC, &end);
-      double elapsed = (end.tv_sec - start.tv_sec) + 
+      double elapsed = (end.tv_sec - start.tv_sec) +
                       (end.tv_nsec - start.tv_nsec) / 1e9;
-      printf("🕒 分类耗时: %.3f 秒\n", elapsed);
+      printf("🕒 处理耗时: %.3f 秒\n", elapsed);
       
       printf("📤 发送响应...\n");
 
-      // 生成JSON响应
+      // Generate JSON response
       char json_response[512];
       snprintf(json_response, sizeof(json_response),
-          "{\"class\":%d,\"probability\":%.4f}",
-          res.class_id, res.probability);
+          "{\"class\":%d,\"probability\":%.4f,\"svm_score\":%.4f,\"rknn_score\":%.4f}",
+          final_res.class_id, final_res.probability,
+          final_res.svm_score, final_res.rknn_score);
 
-      printf("分类结果: 类别=%d, 概率=%.4f\n", 
-             res.class_id, res.probability);
+      printf("融合结果: 类别=%d, 概率=%.4f, SVM分数=%.4f, RKNN分数=%.4f\n",
+             final_res.class_id, final_res.probability,
+             final_res.svm_score, final_res.rknn_score);
 
-      // 发送响应
-      mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", 
+      // Send response
+      mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s",
                    json_response);
 
       // 确保数据发送完成
@@ -187,6 +367,9 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
 }
 
 int main(int argc, char *argv[]) {
+  // Initialize SVM model
+  svm_model = new SVMModel("nn_model.onnx");
+  
   mg_mgr_init(&mgr);
   mg_http_listen(&mgr, s_listen_addr, fn, NULL);
   printf("🚀 服务器已启动，监听地址: %s\n", s_listen_addr);

@@ -148,7 +148,7 @@ cd /our_project
 - JSON 格式要求：
   - `image` 字段必须紧跟在冒号后面，不能有空格
   - JSON 字符串中不能包含不必要的空格或换行符
-  - Python客户端必须使用 `json.dumps(data, separators=(',', ':'))` 确保格式正确
+  - Python客户端推荐使用 `json.dumps(data, separators=(',', ':'))` 确保格式正确
 
 ## 问题排查
 如果测试失败，请检查：

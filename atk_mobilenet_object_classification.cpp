@@ -72,9 +72,32 @@ public:
     }
 
     float predict(const std::vector<float>& features) {
-        cv::Mat input(1, features.size(), CV_32F, (void*)features.data());
+        // 标准化输入数据
+        float mean = 0.0f, stddev = 0.0f;
+        for (float f : features) {
+            mean += f;
+        }
+        mean /= features.size();
+        for (float f : features) {
+            stddev += (f - mean) * (f - mean);
+        }
+        stddev = sqrt(stddev / features.size());
+        
+        std::vector<float> normalized(features.size());
+        for (size_t i = 0; i < features.size(); i++) {
+            normalized[i] = (features[i] - mean) / stddev;
+        }
+        
+        cv::Mat input(1, normalized.size(), CV_32F, (void*)normalized.data());
         net.setInput(input);
         cv::Mat output = net.forward();
+        
+        // 检查输出形状
+        if (output.rows != 1 || output.cols != 1) {
+            printf("⚠️ 模型输出形状错误: %d x %d\n", output.rows, output.cols);
+            return 0.0f;
+        }
+        
         return output.at<float>(0);
     }
 
@@ -258,12 +281,14 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
       
       // Extract image data
       std::string image_data;
-      size_t image_pos = json_str.find("\"image\":\"");
+      size_t image_pos = json_str.find("\"image\":");
       if (image_pos != std::string::npos) {
-          size_t start = image_pos + 9;
-          size_t end = json_str.find("\"", start);
-          if (end != std::string::npos) {
-              image_data = json_str.substr(start, end - start);
+          size_t start = json_str.find("\"", image_pos + 8);
+          if (start != std::string::npos) {
+              size_t end = json_str.find("\"", start + 1);
+              if (end != std::string::npos) {
+                  image_data = json_str.substr(start + 1, end - start - 1);
+              }
           }
       }
       
@@ -282,8 +307,19 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
       }
       printf("\n");
       
+      // Base64解码图像数据
+      printf("开始Base64解码图像数据\n");
+      std::vector<unsigned char> decoded_image = base64_decode(image_data);
+      printf("Base64解码完成，解码后数据大小: %zu bytes\n", decoded_image.size());
+      
+      if (decoded_image.empty()) {
+          printf("⚠️ Base64解码失败\n");
+          mg_http_reply(c, 400, "", "{\"error\":\"Failed to decode base64 image\"}");
+          return;
+      }
+      
       ClassificationResult rknn_res = classify_image(
-          image_data.data(), image_data.length());
+          decoded_image.data(), decoded_image.size());
       
       // Extract features with error handling
       std::vector<float> features;
@@ -328,6 +364,13 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
           }
       }
       
+      // 检查特征数量
+      if (features.size() != 34) {
+          printf("⚠️ 特征数量错误: 期望34个，实际收到%zu个\n", features.size());
+          mg_http_reply(c, 400, "", "{\"error\":\"Invalid features: expected 34 features\"}");
+          return;
+      }
+      
       float svm_score = svm_model->predict(features);
       
       // Combine results
@@ -343,11 +386,11 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
       // Generate JSON response
       char json_response[512];
       snprintf(json_response, sizeof(json_response),
-          "{\"class\":%d,\"probability\":%.4f,\"svm_score\":%.4f,\"rknn_score\":%.4f}",
+          "{\"class\":%d,\"probability\":%.4f,\"blood_score\":%.4f,\"rknn_score\":%.4f}",
           final_res.class_id, final_res.probability,
           final_res.svm_score, final_res.rknn_score);
 
-      printf("融合结果: 类别=%d, 概率=%.4f, SVM分数=%.4f, RKNN分数=%.4f\n",
+      printf("融合结果: 类别=%d, 概率=%.4f, 血常规分数=%.4f, RKNN分数=%.4f\n",
              final_res.class_id, final_res.probability,
              final_res.svm_score, final_res.rknn_score);
 

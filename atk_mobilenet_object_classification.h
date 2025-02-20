@@ -17,8 +17,10 @@
 #include <thread>
 #include <vector>
 #include <queue>
-#include <mutex>
 #include <condition_variable>
+#include <fstream>
+#include <iomanip>
+#include <chrono>
 
 // RKNN相关
 #include "rknn_api.h"
@@ -29,14 +31,26 @@
 // HTTP服务器相关
 #include "mongoose.h"
 
-// 分类结果结构体
-typedef struct {
-    uint32_t class_id;    // 分类结果（0或1）
-    float probability;    // 概率值
-} ClassificationResult;
 
 // 函数声明
 static unsigned char *load_model(const char *filename, int *model_size);
-static int rknn_GetResult(float *prob_data, ClassificationResult *result);
+static int rknn_GetResult(float *prob_data, struct ClassificationResult *result);
+
+struct ClassificationResult {
+    int class_id;
+    float probability;
+};
+
+// 分类结果结构体
+struct FusionResult {
+    int class_id;
+    float probability;
+    float svm_score;
+    float rknn_score;
+};
+
+// 添加结果保存函数声明
+void save_inference_result(const FusionResult& result,
+                         double processing_time);
 
 #endif // _ATK_MOBILENET_OBJECT_CLASSIFICATION_H

@@ -105,14 +105,6 @@ private:
     cv::dnn::Net net;
 };
 
-// Fusion result structure
-struct FusionResult {
-    int class_id;
-    float probability;
-    float svm_score;
-    float rknn_score;
-};
-
 // Weighted fusion function
 FusionResult weighted_fusion(float svm_score, float rknn_score,
                            float svm_weight = 0.5f, float rknn_weight = 0.5f) {
@@ -401,6 +393,9 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
       // 确保数据发送完成
       c->is_resp = 1;  // 标记为响应已发送
       c->is_draining = 1;  // 确保所有数据都被发送
+
+      // 保存推理结果
+      save_inference_result(final_res, elapsed);
     } else {
       printf("⚠️ 拒绝请求：路径未找到\n");
       mg_http_reply(c, 404, "", "{\"error\":\"Not Found\"}");
@@ -477,7 +472,32 @@ static void softmax(float* input, size_t size) {
 }
 
 // 修改结果处理函数
-static int rknn_GetResult(float *prob_data, ClassificationResult *result) {
+// 保存推理结果到CSV文件
+void save_inference_result(const FusionResult& result, double processing_time) {
+    static std::mutex file_mutex;
+    std::lock_guard<std::mutex> lock(file_mutex);
+    
+    // 获取当前时间
+    auto now = std::chrono::system_clock::now();
+    auto now_time_t = std::chrono::system_clock::to_time_t(now);
+    
+    // 打开文件追加写入
+    std::ofstream outfile("inference_results.csv", std::ios::app);
+    if (!outfile.is_open()) {
+        printf("⚠️ 无法打开结果文件\n");
+        return;
+    }
+    
+    // 写入CSV格式数据
+    outfile << std::put_time(std::localtime(&now_time_t), "%Y-%m-%d %H:%M:%S") << ","
+            << result.class_id << ","
+            << result.probability << ","
+            << result.svm_score << ","
+            << result.rknn_score << ","
+            << processing_time << "\n";
+}
+
+static int rknn_GetResult(float *prob_data, struct ClassificationResult *result) {
     // 对输出进行softmax处理
     softmax(prob_data, 2);  // 2个类别
     

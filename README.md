@@ -92,7 +92,16 @@ print(response.json())
   - JSON 字符串中不能包含不必要的空格或换行符
   - Python客户端推荐使用 `json.dumps(data, separators=(',', ':'))` 确保格式正确
 
-**Q2: 端口占用错误**
+**Q2: Invalid JSON: missing image field**
+- 请检查输入图片路径是否正确
+- 请检查图片base64编码是否成功
+- 请检查image字段后是否存在多余空格或回车
+
+**Q3: Invalid features: expected 34 features**
+- 请检查特征数量是否正确
+- 请检查features字段后是否存在多余空格或回车
+
+**Q4: 端口占用错误**
 ```bash
 netstat -tuln | grep 8080
 kill -9 <PID>

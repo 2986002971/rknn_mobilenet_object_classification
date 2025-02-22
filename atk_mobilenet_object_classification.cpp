@@ -63,6 +63,29 @@ std::vector<unsigned char> base64_decode(const std::string &encoded_string) {
     return decoded_data;
 }
 
+// 添加softmax函数
+static void softmax(float* input, size_t size) {
+    float max_val = input[0];
+    float sum = 0.0f;
+    
+    // 找最大值
+    for (size_t i = 0; i < size; i++) {
+        if (input[i] > max_val) {
+            max_val = input[i];
+        }
+    }
+    
+    // 计算exp并求和
+    for (size_t i = 0; i < size; i++) {
+        input[i] = exp(input[i] - max_val);  // 减去最大值避免数值溢出
+        sum += input[i];
+    }
+    
+    // 归一化
+    for (size_t i = 0; i < size; i++) {
+        input[i] /= sum;
+    }
+}
 
 // SVM Model class
 class SVMModel {
@@ -72,35 +95,54 @@ public:
     }
 
     float predict(const std::vector<float>& features) {
-        // 标准化输入数据
-        float mean = 0.0f, stddev = 0.0f;
-        for (float f : features) {
-            mean += f;
-        }
-        mean /= features.size();
-        for (float f : features) {
-            stddev += (f - mean) * (f - mean);
-        }
-        stddev = sqrt(stddev / features.size());
-        
+        // 使用训练时相同的标准化方法
         std::vector<float> normalized(features.size());
         for (size_t i = 0; i < features.size(); i++) {
-            normalized[i] = (features[i] - mean) / stddev;
+            normalized[i] = features[i];  // 先复制原始数据
         }
         
         cv::Mat input(1, normalized.size(), CV_32F, (void*)normalized.data());
         net.setInput(input);
         cv::Mat output = net.forward();
         
-        // 检查输出形状
-        if (output.rows != 1 || output.cols != 1) {
-            printf("⚠️ 模型输出形状错误: %d x %d\n", output.rows, output.cols);
+        // 检查输出形状 - 现在应该是1x3的输出
+        if (output.rows != 1 || output.cols != 3) {
+            printf("⚠️ 模型输出形状错误: %d x %d (应为 1x3)\n", output.rows, output.cols);
             return 0.0f;
         }
         
-        return output.at<float>(0);
-    }
+        // 找出最大概率的类别并应用softmax
+        float probs[3];
+        for (int i = 0; i < 3; i++) {
+            probs[i] = output.at<float>(0, i);
+        }
+        softmax(probs, 3);
+        
+        float max_prob = probs[0];
+        int max_index = 0;
+        for (int i = 1; i < 3; i++) {
+            if (probs[i] > max_prob) {
+                max_prob = probs[i];
+                max_index = i;
+            }
+        }
 
+        // 在predict函数中添加调试输出
+    printf("原始输出值: ");
+    for (int i = 0; i < 3; i++) {
+        printf("%.4f ", output.at<float>(0, i));
+    }
+    printf("\n");
+
+    printf("Softmax后概率: ");
+    for (int i = 0; i < 3; i++) {
+        printf("%.4f ", probs[i]);
+    }
+    printf("\n");
+        
+        return static_cast<float>(max_index);  // 返回类别索引
+    }
+    
 private:
     cv::dnn::Net net;
 };
@@ -109,9 +151,20 @@ private:
 FusionResult weighted_fusion(float svm_score, float rknn_score,
                            float svm_weight = 0.5f, float rknn_weight = 0.5f) {
     FusionResult res;
-    float combined = svm_score * svm_weight + rknn_score * rknn_weight;
-    res.class_id = combined > 0.5f ? 1 : 0;
-    res.probability = combined;
+    // 如果两个模型预测结果一致，就使用该结果
+    if (int(svm_score) == int(rknn_score)) {
+        res.class_id = int(svm_score);
+        res.probability = (svm_weight * svm_score + rknn_weight * rknn_score);
+    } else {
+        // 如果预测不一致，使用概率较高的结果
+        if (svm_weight * svm_score > rknn_weight * rknn_score) {
+            res.class_id = int(svm_score);
+            res.probability = svm_score;
+        } else {
+            res.class_id = int(rknn_score);
+            res.probability = rknn_score;
+        }
+    }
     res.svm_score = svm_score;
     res.rknn_score = rknn_score;
     return res;
@@ -379,8 +432,10 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
       char json_response[512];
       snprintf(json_response, sizeof(json_response),
           "{\"class\":%d,\"probability\":%.4f,\"blood_score\":%.4f,\"rknn_score\":%.4f}",
-          final_res.class_id, final_res.probability,
-          final_res.svm_score, final_res.rknn_score);
+          final_res.class_id,
+          final_res.probability,
+          final_res.svm_score,
+          final_res.rknn_score);
 
       printf("融合结果: 类别=%d, 概率=%.4f, 血常规分数=%.4f, RKNN分数=%.4f\n",
              final_res.class_id, final_res.probability,
@@ -447,30 +502,6 @@ static unsigned char *load_model(const char *filename, int *model_size) {
   return model;
 }
 
-// 添加softmax函数
-static void softmax(float* input, size_t size) {
-    float max_val = input[0];
-    float sum = 0.0f;
-    
-    // 找最大值
-    for (size_t i = 0; i < size; i++) {
-        if (input[i] > max_val) {
-            max_val = input[i];
-        }
-    }
-    
-    // 计算exp并求和
-    for (size_t i = 0; i < size; i++) {
-        input[i] = exp(input[i] - max_val);  // 减去最大值避免数值溢出
-        sum += input[i];
-    }
-    
-    // 归一化
-    for (size_t i = 0; i < size; i++) {
-        input[i] /= sum;
-    }
-}
-
 // 修改结果处理函数
 // 保存推理结果到CSV文件
 void save_inference_result(const FusionResult& result, double processing_time) {
@@ -499,20 +530,21 @@ void save_inference_result(const FusionResult& result, double processing_time) {
 
 static int rknn_GetResult(float *prob_data, struct ClassificationResult *result) {
     // 对输出进行softmax处理
-    softmax(prob_data, 2);  // 2个类别
+    softmax(prob_data, 3);  // 修改为3个类别
     
-    // 获取第一个类别的概率
-    float prob_0 = prob_data[0];
-    float prob_1 = prob_data[1];
+    // 找出最大概率的类别
+    float max_prob = prob_data[0];
+    int max_index = 0;
     
-    // 选择概率较大的类别
-    if (prob_1 > prob_0) {
-        result->class_id = 1;
-        result->probability = prob_1;
-    } else {
-        result->class_id = 0;
-        result->probability = prob_0;
+    for(int i = 1; i < 3; i++) {
+        if(prob_data[i] > max_prob) {
+            max_prob = prob_data[i];
+            max_index = i;
+        }
     }
+    
+    result->class_id = max_index;  // 0: 健康, 1: 细菌感染, 2: 支原体感染
+    result->probability = max_prob;
     
     return 0;
 }

@@ -7,7 +7,7 @@
 - **推理框架**：RKNN Runtime 1.7.0
 - **模型支持**：MobileNet v2 (输入224x224 RGB)
 - **协议支持**：HTTP/1.1
-- **平均延迟**：<20ms (RV1126)，首次推理会慢一些
+- **平均延迟**：<20ms (RV1126)，首次推理时由于需要编译计算图，会慢一些，在5秒以上
 - **最大并发**：未测试
 
 ## 3. API接口
@@ -46,6 +46,38 @@ Content-Length: <json_size>
 500 服务器内部错误
 
 ## 4. 使用示例
+
+### 编译说明：
+
+### 环境要求
+- Linux操作系统
+- CMake 3.8或更高版本
+- ATK-DLRV1126交叉编译工具链 (位于`/opt/atk-dlrv1126-toolchain`)
+- OpenCV 依赖库
+
+### 编译步骤
+1. 创建并进入构建目录：
+```bash
+mkdir build
+cd build
+```
+
+2. 生成构建文件：
+```bash
+cmake ..
+```
+
+3. 开始编译：
+```bash
+make
+```
+
+编译完成后，在`build`目录下会生成可执行文件`atk_mobilenet_object_classification`。
+
+注意事项：
+- 请确保已正确安装交叉编译工具链
+- 确保OpenCV库已正确配置
+- 如遇到编译错误，请检查工具链路径是否正确
 
 ### 4.1 CURL调用
 ```bash
